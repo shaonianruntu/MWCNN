@@ -5,37 +5,46 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
+
 class Model(nn.Module):
     def __init__(self, args, ckp):
         super(Model, self).__init__()
         print('Making model...')
 
-        self.scale = args.scale
+        self.scale = args.scale  # 超分辨路重建的 scale
         self.idx_scale = 0
         self.self_ensemble = args.self_ensemble
         self.chop = args.chop
-        self.precision = args.precision
-        self.cpu = args.cpu
+        self.precision = args.precision  # 预测结果的浮点数精度
+        self.cpu = args.cpu  # 如果传入cpu的外部参数，手动声明使用cpu，就用cpu，否则用gpu
         self.device = torch.device('cpu' if args.cpu else 'cuda')
-        self.n_GPUs = args.n_GPUs
-        self.save_models = args.save_models
+        self.n_GPUs = args.n_GPUs  # gpu的个数，默认1个
+        self.save_models = args.save_models  # 是否选择保存模型
 
+        # 导入需要使用的预测模型
+        # ! 但是我觉得这里有个问题，应该在 option 把 model 的默认值从 BSR 改成 MW
         module = import_module('model.' + args.model.lower())
         self.model = module.make_model(args).to(self.device)
+
+        # 浮点格式的精度
         if args.precision == 'half': self.model.half()
 
+        # 多GPU
         if not args.cpu and args.n_GPUs > 1:
             self.model = nn.DataParallel(self.model, range(args.n_GPUs))
 
-        self.load(
-            ckp.dir,
-            pre_train=args.pre_train,
-            resume=args.resume,
-            name=args.model,
-            cpu=args.cpu
-        )
-        if args.print_model: print(self.model)
+        # 导入外部的预训练模型
+        self.load(ckp.dir,
+                  pre_train=args.pre_train,
+                  resume=args.resume,
+                  name=args.model,
+                  cpu=args.cpu)
 
+        # 输出模型
+        if args.print_model:
+            print(self.model)
+
+    # ? 没看懂
     def forward(self, x, idx_scale):
         self.idx_scale = idx_scale
         target = self.get_model()
@@ -47,57 +56,50 @@ class Model(nn.Module):
                 forward_function = self.forward_chop
             else:
                 forward_function = self.model.forward
-
             return self.forward_x8(x, forward_function)
         elif self.chop and not self.training:
             return self.forward_chop(x)
             # return self.model(x)
         else:
-
             return self.model(x)
 
+    # 根据 GPU 个数导入训练模型
     def get_model(self):
         if self.n_GPUs == 1:
             return self.model
         else:
             return self.model.module
 
+    # 对模型进行参数映射
     def state_dict(self, **kwargs):
         target = self.get_model()
         return target.state_dict(**kwargs)
 
+    # 保存模型
     def save(self, apath, epoch, name, is_best=False):
         target = self.get_model()
-        torch.save(
-            target.state_dict(), 
-            os.path.join(apath, 'model', name + 'model_latest.pt')
-        )
+        torch.save(target.state_dict(),
+                   os.path.join(apath, 'model', name + 'model_latest.pt'))
         if is_best:
-            torch.save(
-                target.state_dict(),
-                os.path.join(apath, 'model', name + 'model_best.pt')
-            )
-        
+            torch.save(target.state_dict(),
+                       os.path.join(apath, 'model', name + 'model_best.pt'))
         if self.save_models:
             torch.save(
                 target.state_dict(),
-                os.path.join(apath, 'model', name + 'model_{}.pt'.format(epoch))
-            )
+                os.path.join(apath, 'model',
+                             name + 'model_{}.pt'.format(epoch)))
 
-    def load(self, apath, pre_train='.', resume=-1, name='',  cpu=False):
+    # 导入模型
+    def load(self, apath, pre_train='.', resume=-1, name='', cpu=False):
         if cpu:
             kwargs = {'map_location': lambda storage, loc: storage}
         else:
             kwargs = {}
 
         if resume == -1:
-            self.get_model().load_state_dict(
-                torch.load(
-                    os.path.join(pre_train, name + 'model_latest.pt'),
-                    **kwargs
-                ),
-                strict=False
-            )
+            self.get_model().load_state_dict(torch.load(
+                os.path.join(pre_train, name + 'model_latest.pt'), **kwargs),
+                                             strict=False)
 
             # self.get_model().load_state_dict(
             #     torch.load(
@@ -110,18 +112,14 @@ class Model(nn.Module):
         elif resume == 0:
             if pre_train != '.':
                 print('Loading model from {}'.format(pre_train))
-                self.get_model().load_state_dict(
-                    torch.load(pre_train, **kwargs),
-                    strict=False
-                )
+                self.get_model().load_state_dict(torch.load(
+                    pre_train, **kwargs),
+                                                 strict=False)
         else:
-            self.get_model().load_state_dict(
-                torch.load(
-                    os.path.join(apath, 'model', 'model_{}.pt'.format(resume)),
-                    **kwargs
-                ),
-                strict=False
-            )
+            self.get_model().load_state_dict(torch.load(
+                os.path.join(apath, 'model', 'model_{}.pt'.format(resume)),
+                **kwargs),
+                                             strict=False)
 
     def forward_chop(self, x, shave=10, min_size=160000):
         scale = self.scale[self.idx_scale]
@@ -130,10 +128,10 @@ class Model(nn.Module):
         h_half, w_half = h // 2, w // 2
         h_size, w_size = h_half + shave, w_half + shave
         lr_list = [
-            x[:, :, 0:h_size, 0:w_size],
-            x[:, :, 0:h_size, (w - w_size):w],
+            x[:, :, 0:h_size, 0:w_size], x[:, :, 0:h_size, (w - w_size):w],
             x[:, :, (h - h_size):h, 0:w_size],
-            x[:, :, (h - h_size):h, (w - w_size):w]]
+            x[:, :, (h - h_size):h, (w - w_size):w]
+        ]
         # lr_list = [
         #     x[:, :, 0:h_size, 0:w_size],
         #     x[:, :, 0:h_size, (w - w_size):w],
@@ -203,4 +201,3 @@ class Model(nn.Module):
         output = output_cat.mean(dim=0, keepdim=True)
 
         return output
-
