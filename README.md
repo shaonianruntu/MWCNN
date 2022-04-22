@@ -7,7 +7,7 @@
  * @LastEditTime: 2019-11-19 14:25:09
  -->
 
-# MWCNN_PyTorch
+# MWCNN implementation based on Pytorch
 
 ## 论文地址
 https://arxiv.org/abs/1805.07071
